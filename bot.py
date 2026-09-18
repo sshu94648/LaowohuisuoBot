@@ -512,14 +512,13 @@ async def send_main_menu(
     context: ContextTypes.DEFAULT_TYPE,
     chat_id,
 ):
-
-    return await context.bot.send_message(
+    msg = await context.bot.copy_message(
         chat_id=chat_id,
-        text=main_menu_text(),
-        parse_mode="HTML",
+        from_chat_id="@Laohuisuo",
+        message_id=1097,
         reply_markup=home_keyboard(),
-        disable_web_page_preview=True,
     )
+    return msg
 
 
 async def start(
