@@ -1,9 +1,14 @@
 import os
 import re
 import sqlite3
+import html
 from datetime import datetime, timezone
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Update,
+)
 from telegram.constants import ChatMemberStatus
 from telegram.ext import (
     Application,
@@ -14,21 +19,39 @@ from telegram.ext import (
     filters,
 )
 
+
+# =========================================================
+# 基础配置
+# =========================================================
+
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 
+# 主要资料频道
 CHANNEL_USERNAME = "@Laohuisuo"
-CHANNEL_PUBLIC_NAME = "万象三江频道"
 
-COMMUNITY_LINKS = [
-    ("🔥 老挝万象—华人社区", "https://t.me/LaowoGroup"),
-    ("💬 万象同城交流群", "https://t.me/LaoWoChatting"),
-    ("📢 万象便民信息频道", "https://t.me/ViantianeNews"),
-    ("🏨 万象三江频道", "https://t.me/Laohuisuo"),
+# 三个互通入口
+MENU_TARGETS = [
+    ("🏨 三江休闲会所", "@Laohuisuo", "https://t.me/Laohuisuo"),
+    ("💬 万象同城交流群", "@LaoWoChatting", "https://t.me/LaoWoChatting"),
+    ("🌏 老挝万象—华人社区", "@LaowoGroup", "https://t.me/LaowoGroup"),
 ]
 
+# Railway 已经设置：
+# DB_PATH=/data/bot.db
 DB_PATH = os.getenv("DB_PATH", "bot.db")
-CODE_RE = re.compile(r"(?<![A-Z0-9])([TACF]\d{1,3})(?![A-Z0-9])", re.I)
 
+# 只识别 T/A/C/F + 1～3 位数字
+CODE_RE = re.compile(
+    r"(?<![A-Z0-9])([TACF]\d{1,3})(?![A-Z0-9])",
+    re.I,
+)
+
+CATEGORY_PAGE_SIZE = 20
+
+
+# =========================================================
+# 数据库
+# =========================================================
 
 def db():
     conn = sqlite3.connect(DB_PATH)
@@ -38,6 +61,7 @@ def db():
 
 def init_db():
     with db() as conn:
+
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS codes (
@@ -48,6 +72,7 @@ def init_db():
             )
             """
         )
+
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS users (
@@ -58,6 +83,7 @@ def init_db():
             )
             """
         )
+
         conn.commit()
 
 
@@ -67,305 +93,1289 @@ def now_iso():
 
 def touch_user(update: Update):
     user = update.effective_user
+
     if not user:
         return
+
     ts = now_iso()
+
     with db() as conn:
+
         conn.execute(
             """
-            INSERT INTO users(user_id, username, first_seen, last_seen)
+            INSERT INTO users (
+                user_id,
+                username,
+                first_seen,
+                last_seen
+            )
             VALUES (?, ?, ?, ?)
-            ON CONFLICT(user_id) DO UPDATE SET
+
+            ON CONFLICT(user_id)
+            DO UPDATE SET
                 username=excluded.username,
                 last_seen=excluded.last_seen
             """,
-            (user.id, user.username, ts, ts),
+            (
+                user.id,
+                user.username,
+                ts,
+                ts,
+            ),
         )
+
         conn.commit()
 
 
-def save_code(code: str, post_url: str, message_id: int | None = None):
+def save_code(
+    code: str,
+    post_url: str,
+    message_id: int | None = None,
+):
     code = code.upper()
+
     with db() as conn:
+
         conn.execute(
             """
-            INSERT INTO codes(code, post_url, message_id, updated_at)
+            INSERT INTO codes (
+                code,
+                post_url,
+                message_id,
+                updated_at
+            )
             VALUES (?, ?, ?, ?)
-            ON CONFLICT(code) DO UPDATE SET
+
+            ON CONFLICT(code)
+            DO UPDATE SET
                 post_url=excluded.post_url,
                 message_id=excluded.message_id,
                 updated_at=excluded.updated_at
             """,
-            (code, post_url, message_id, now_iso()),
+            (
+                code,
+                post_url,
+                message_id,
+                now_iso(),
+            ),
         )
+
         conn.commit()
 
 
 def delete_code(code: str) -> bool:
     with db() as conn:
-        cur = conn.execute("DELETE FROM codes WHERE code=?", (code.upper(),))
+
+        cur = conn.execute(
+            "DELETE FROM codes WHERE code=?",
+            (code.upper(),),
+        )
+
         conn.commit()
+
         return cur.rowcount > 0
 
 
 def get_code(code: str):
     with db() as conn:
-        return conn.execute("SELECT * FROM codes WHERE code=?", (code.upper(),)).fetchone()
+
+        return conn.execute(
+            """
+            SELECT *
+            FROM codes
+            WHERE code=?
+            """,
+            (code.upper(),),
+        ).fetchone()
+
+
+def natural_code_key(row):
+    code = row["code"].upper()
+
+    try:
+        return (
+            code[0],
+            int(code[1:]),
+        )
+    except Exception:
+        return (
+            code[0],
+            999999,
+        )
 
 
 def get_codes(prefix: str | None = None):
     with db() as conn:
+
         if prefix:
-            return conn.execute(
-                "SELECT * FROM codes WHERE code LIKE ? ORDER BY code",
+
+            rows = conn.execute(
+                """
+                SELECT *
+                FROM codes
+                WHERE code LIKE ?
+                """,
                 (prefix.upper() + "%",),
             ).fetchall()
-        return conn.execute("SELECT * FROM codes ORDER BY code").fetchall()
+
+        else:
+
+            rows = conn.execute(
+                """
+                SELECT *
+                FROM codes
+                """
+            ).fetchall()
+
+    return sorted(
+        rows,
+        key=natural_code_key,
+    )
 
 
 def get_latest(limit=12):
     with db() as conn:
+
         return conn.execute(
-            "SELECT * FROM codes ORDER BY updated_at DESC LIMIT ?", (limit,)
+            """
+            SELECT *
+            FROM codes
+            ORDER BY updated_at DESC
+            LIMIT ?
+            """,
+            (limit,),
         ).fetchall()
 
 
-def code_button(code, url):
-    return InlineKeyboardButton(code, url=url)
-
+# =========================================================
+# 通用工具
+# =========================================================
 
 def chunk(items, size=4):
-    return [items[i:i+size] for i in range(0, len(items), size)]
+    return [
+        items[i:i + size]
+        for i in range(
+            0,
+            len(items),
+            size,
+        )
+    ]
+
+
+def code_button(code, url):
+    return InlineKeyboardButton(
+        code,
+        url=url,
+    )
+
+
+def main_menu_text():
+    return (
+        "🇱🇦 <b>万象互通 · 群内导航菜单</b>\n\n"
+        "欢迎使用群内导航。\n"
+        "点击下方按钮可查看佳丽、按牌字进入，"
+        "并在三个群组/频道之间快速互通。\n\n"
+        "✨ 万象相连 · 信息互通"
+    )
 
 
 def home_keyboard():
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("T 系列", callback_data="cat:T"),
-            InlineKeyboardButton("A 系列", callback_data="cat:A"),
+            InlineKeyboardButton(
+                "🌸 T牌字",
+                callback_data="cat:T:0",
+            ),
+            InlineKeyboardButton(
+                "✨ A牌字",
+                callback_data="cat:A:0",
+            ),
         ],
+
         [
-            InlineKeyboardButton("C 系列", callback_data="cat:C"),
-            InlineKeyboardButton("F 系列", callback_data="cat:F"),
+            InlineKeyboardButton(
+                "🪷 C牌字",
+                callback_data="cat:C:0",
+            ),
+            InlineKeyboardButton(
+                "🦋 F牌字",
+                callback_data="cat:F:0",
+            ),
         ],
+
         [
-            InlineKeyboardButton("🆕 最新更新", callback_data="latest"),
-            InlineKeyboardButton("🌏 华人社区导航", callback_data="nav"),
+            InlineKeyboardButton(
+                "🆕 最新更新",
+                callback_data="latest",
+            ),
+            InlineKeyboardButton(
+                "🔎 查询佳丽",
+                callback_data="query_help",
+            ),
         ],
-        [InlineKeyboardButton("🏨 打开频道", url="https://t.me/Laohuisuo")],
+
+        [
+            InlineKeyboardButton(
+                "🏨 三江休闲会所",
+                url="https://t.me/Laohuisuo",
+            ),
+            InlineKeyboardButton(
+                "💬 万象同城交流群",
+                url="https://t.me/LaoWoChatting",
+            ),
+        ],
+
+        [
+            InlineKeyboardButton(
+                "🌏 老挝万象—华人社区",
+                url="https://t.me/LaowoGroup",
+            ),
+            InlineKeyboardButton(
+                "📜 使用说明",
+                callback_data="guide",
+            ),
+        ],
     ])
 
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    touch_user(update)
-    text = (
-        "🇱🇦 <b>万象三江 · 代码查询</b>\n\n"
-        "请选择分类，或直接发送代码查询。\n"
-        "例如：<code>T55</code>、<code>A15</code>、<code>F128</code>\n\n"
-        "点击代码即可打开频道内对应图片。"
-    )
-    await update.effective_message.reply_text(
-        text, reply_markup=home_keyboard(), parse_mode="HTML"
-    )
+def category_keyboard(prefix, page):
+    rows = get_codes(prefix)
 
+    total = len(rows)
 
-async def handle_private_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_chat.type != "private":
-        return
-    touch_user(update)
-    text = (update.effective_message.text or "").strip().upper()
-    match = CODE_RE.fullmatch(text)
-    if not match:
-        await update.effective_message.reply_text(
-            "请输入完整代码，例如：T55、A15、C89、F128。",
-            reply_markup=home_keyboard(),
-        )
-        return
-
-    code = match.group(1).upper()
-    row = get_code(code)
-    if not row:
-        await update.effective_message.reply_text(
-            f"暂未收录 {code}。\n\n如果这是旧频道内容，需要管理员先补录。",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔙 返回首页", callback_data="home")]
+    if total == 0:
+        return (
+            InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(
+                        "🔙 返回菜单",
+                        callback_data="home",
+                    )
+                ]
             ]),
+            0,
+            0,
         )
-        return
 
-    await update.effective_message.reply_text(
-        f"🔎 查询结果：<b>{code}</b>",
-        parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton(f"🖼 查看 {code} 图片", url=row["post_url"])],
-            [InlineKeyboardButton("🔙 返回首页", callback_data="home")],
-        ]),
+    start = page * CATEGORY_PAGE_SIZE
+
+    if start >= total:
+        page = 0
+        start = 0
+
+    end = min(
+        start + CATEGORY_PAGE_SIZE,
+        total,
+    )
+
+    page_rows = rows[start:end]
+
+    buttons = [
+        code_button(
+            r["code"],
+            r["post_url"],
+        )
+        for r in page_rows
+    ]
+
+    keyboard = chunk(
+        buttons,
+        4,
+    )
+
+    page_count = (
+        total + CATEGORY_PAGE_SIZE - 1
+    ) // CATEGORY_PAGE_SIZE
+
+    nav = []
+
+    if page > 0:
+        nav.append(
+            InlineKeyboardButton(
+                "◀️ 上一页",
+                callback_data=f"cat:{prefix}:{page - 1}",
+            )
+        )
+
+    if page + 1 < page_count:
+        nav.append(
+            InlineKeyboardButton(
+                "下一页 ▶️",
+                callback_data=f"cat:{prefix}:{page + 1}",
+            )
+        )
+
+    if nav:
+        keyboard.append(nav)
+
+    keyboard.append([
+        InlineKeyboardButton(
+            "🔙 返回菜单",
+            callback_data="home",
+        )
+    ])
+
+    return (
+        InlineKeyboardMarkup(keyboard),
+        total,
+        page_count,
     )
 
 
-async def button_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    await q.answer()
-    touch_user(update)
+def make_clickable_text(text: str):
+    result = []
+    missing = []
 
-    data = q.data
+    last = 0
 
-    if data == "home":
-        await q.edit_message_text(
-            "🇱🇦 <b>万象三江 · 代码查询</b>\n\n请选择分类，或直接发送代码查询。",
-            parse_mode="HTML",
-            reply_markup=home_keyboard(),
+    for match in CODE_RE.finditer(text):
+
+        start, end = match.span()
+
+        code = match.group(1).upper()
+
+        result.append(
+            html.escape(
+                text[last:start]
+            )
         )
-        return
 
-    if data.startswith("cat:"):
-        prefix = data.split(":", 1)[1]
-        rows = get_codes(prefix)
-        if rows:
-            btns = [code_button(r["code"], r["post_url"]) for r in rows]
-            keyboard = chunk(btns, 4)
-            keyboard.append([InlineKeyboardButton("🔙 返回首页", callback_data="home")])
-            markup = InlineKeyboardMarkup(keyboard)
-            text = f"<b>{prefix} 系列</b> · 共 {len(rows)} 个代码\n\n点击代码查看对应图片："
+        row = get_code(code)
+
+        if row:
+
+            url = html.escape(
+                row["post_url"],
+                quote=True,
+            )
+
+            result.append(
+                f'<a href="{url}">{code}</a>'
+            )
+
         else:
-            markup = InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔙 返回首页", callback_data="home")]
-            ])
-            text = f"<b>{prefix} 系列</b>\n\n暂时没有已收录代码。"
-        await q.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
-        return
 
-    if data == "latest":
-        rows = get_latest(12)
-        keyboard = []
-        if rows:
-            btns = [code_button(r["code"], r["post_url"]) for r in rows]
-            keyboard.extend(chunk(btns, 4))
-        keyboard.append([InlineKeyboardButton("🔙 返回首页", callback_data="home")])
-        await q.edit_message_text(
-            "🆕 <b>最近更新</b>\n\n点击代码查看图片："
-            if rows else "🆕 暂无已收录代码。",
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(keyboard),
+            result.append(code)
+
+            if code not in missing:
+                missing.append(code)
+
+        last = end
+
+    result.append(
+        html.escape(
+            text[last:]
         )
-        return
+    )
 
-    if data == "nav":
-        keyboard = [[InlineKeyboardButton(name, url=url)] for name, url in COMMUNITY_LINKS]
-        keyboard.append([InlineKeyboardButton("🔙 返回首页", callback_data="home")])
-        await q.edit_message_text(
-            "🌏 <b>老挝万象—华人社区导航</b>\n\n请选择入口：",
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-        )
-        return
+    return (
+        "".join(result),
+        missing,
+    )
 
 
-async def index_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = update.channel_post or update.edited_channel_post
-    if not msg:
-        return
+# =========================================================
+# 管理员权限
+# =========================================================
 
-    chat_username = (msg.chat.username or "").lower()
-    if chat_username != CHANNEL_USERNAME.lstrip("@").lower():
-        return
+async def is_master_admin(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> bool:
 
-    source_text = " ".join(
-        part for part in [msg.caption, msg.text] if part
-    ).upper()
-
-    codes = sorted(set(m.upper() for m in CODE_RE.findall(source_text)))
-    if not codes:
-        return
-
-    post_url = f"https://t.me/{msg.chat.username}/{msg.message_id}"
-    for code in codes:
-        save_code(code, post_url, msg.message_id)
-
-
-async def is_channel_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     user = update.effective_user
+
     if not user:
         return False
+
     try:
-        member = await context.bot.get_chat_member(CHANNEL_USERNAME, user.id)
+
+        member = await context.bot.get_chat_member(
+            CHANNEL_USERNAME,
+            user.id,
+        )
+
         return member.status in {
             ChatMemberStatus.ADMINISTRATOR,
             ChatMemberStatus.OWNER,
         }
+
     except Exception:
         return False
 
 
-async def admin_set(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await is_channel_admin(update, context):
-        await update.effective_message.reply_text("此命令仅限频道管理员使用。")
-        return
+# =========================================================
+# 菜单
+# =========================================================
 
-    if len(context.args) != 2:
+async def send_main_menu(
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id,
+):
+
+    return await context.bot.send_message(
+        chat_id=chat_id,
+        text=main_menu_text(),
+        parse_mode="HTML",
+        reply_markup=home_keyboard(),
+        disable_web_page_preview=True,
+    )
+
+
+async def start(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+
+    touch_user(update)
+
+    await update.effective_message.reply_text(
+        main_menu_text(),
+        parse_mode="HTML",
+        reply_markup=home_keyboard(),
+        disable_web_page_preview=True,
+    )
+
+
+async def menu(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+
+    if not await is_master_admin(
+        update,
+        context,
+    ):
         await update.effective_message.reply_text(
-            "格式：/set T55 https://t.me/Laohuisuo/123"
+            "此命令仅限管理员使用。"
         )
         return
 
+    await update.effective_message.reply_text(
+        main_menu_text(),
+        parse_mode="HTML",
+        reply_markup=home_keyboard(),
+        disable_web_page_preview=True,
+    )
+
+
+async def menu_all(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+
+    if not await is_master_admin(
+        update,
+        context,
+    ):
+        await update.effective_message.reply_text(
+            "此命令仅限管理员使用。"
+        )
+        return
+
+    results = []
+
+    for name, username, url in MENU_TARGETS:
+
+        try:
+
+            msg = await send_main_menu(
+                context,
+                username,
+            )
+
+            message_link = (
+                f"{url}/{msg.message_id}"
+            )
+
+            results.append(
+                f"✅ {name}\n{message_link}"
+            )
+
+        except Exception as e:
+
+            results.append(
+                f"❌ {name}\n"
+                f"{html.escape(str(e))[:180]}"
+            )
+
+    await update.effective_message.reply_text(
+        "📌 <b>菜单发布结果</b>\n\n"
+        + "\n\n".join(results),
+        parse_mode="HTML",
+        disable_web_page_preview=True,
+    )
+
+
+# =========================================================
+# 按钮路由
+# =========================================================
+
+async def button_router(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+
+    q = update.callback_query
+
+    await q.answer()
+
+    touch_user(update)
+
+    data = q.data or ""
+
+    # -----------------------------------------------------
+    # 返回菜单
+    # -----------------------------------------------------
+
+    if data == "home":
+
+        try:
+
+            await q.edit_message_text(
+                main_menu_text(),
+                parse_mode="HTML",
+                reply_markup=home_keyboard(),
+                disable_web_page_preview=True,
+            )
+
+        except Exception:
+            pass
+
+        return
+
+    # -----------------------------------------------------
+    # T / A / C / F 牌字
+    # -----------------------------------------------------
+
+    if data.startswith("cat:"):
+
+        parts = data.split(":")
+
+        prefix = parts[1].upper()
+
+        try:
+            page = int(parts[2])
+        except Exception:
+            page = 0
+
+        if prefix not in {
+            "T",
+            "A",
+            "C",
+            "F",
+        }:
+            return
+
+        markup, total, page_count = (
+            category_keyboard(
+                prefix,
+                page,
+            )
+        )
+
+        if total == 0:
+
+            text = (
+                f"🌸 <b>{prefix}牌字</b>\n\n"
+                "暂时没有已收录佳丽。"
+            )
+
+        else:
+
+            current_page = page + 1
+
+            text = (
+                f"🌸 <b>{prefix}牌字</b>\n\n"
+                f"已收录：<b>{total}</b> 位\n"
+                f"第 {current_page}/{page_count} 页\n\n"
+                "点击牌字即可查看对应资料。"
+            )
+
+        chat_type = (
+            q.message.chat.type
+            if q.message
+            else ""
+        )
+
+        # 频道里直接切换当前菜单
+        if chat_type == "channel":
+
+            try:
+
+                await q.edit_message_text(
+                    text,
+                    parse_mode="HTML",
+                    reply_markup=markup,
+                    disable_web_page_preview=True,
+                )
+
+            except Exception:
+                pass
+
+        # 群里保留主菜单，另发一个分类面板
+        else:
+
+            await q.message.reply_text(
+                text,
+                parse_mode="HTML",
+                reply_markup=markup,
+                disable_web_page_preview=True,
+            )
+
+        return
+
+    # -----------------------------------------------------
+    # 最新更新
+    # -----------------------------------------------------
+
+    if data == "latest":
+
+        rows = get_latest(12)
+
+        keyboard = []
+
+        if rows:
+
+            buttons = [
+                code_button(
+                    r["code"],
+                    r["post_url"],
+                )
+                for r in rows
+            ]
+
+            keyboard.extend(
+                chunk(
+                    buttons,
+                    4,
+                )
+            )
+
+        keyboard.append([
+            InlineKeyboardButton(
+                "🔙 返回菜单",
+                callback_data="home",
+            )
+        ])
+
+        text = (
+            "🆕 <b>最新更新</b>\n\n"
+            "点击牌字查看最新佳丽资料："
+            if rows
+            else
+            "🆕 <b>最新更新</b>\n\n"
+            "暂时没有已收录资料。"
+        )
+
+        chat_type = (
+            q.message.chat.type
+            if q.message
+            else ""
+        )
+
+        if chat_type == "channel":
+
+            try:
+
+                await q.edit_message_text(
+                    text,
+                    parse_mode="HTML",
+                    reply_markup=InlineKeyboardMarkup(
+                        keyboard
+                    ),
+                )
+
+            except Exception:
+                pass
+
+        else:
+
+            await q.message.reply_text(
+                text,
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(
+                    keyboard
+                ),
+            )
+
+        return
+
+    # -----------------------------------------------------
+    # 查询佳丽说明
+    # -----------------------------------------------------
+
+    if data == "query_help":
+
+        text = (
+            "🔎 <b>查询佳丽</b>\n\n"
+            "直接在群内发送完整牌字即可查询。\n\n"
+            "例如：\n"
+            "<code>T77</code>\n"
+            "<code>A26</code>\n"
+            "<code>C89</code>\n"
+            "<code>F128</code>\n\n"
+            "机器人会返回对应资料入口。"
+        )
+
+        markup = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton(
+                    "🔙 返回菜单",
+                    callback_data="home",
+                )
+            ]
+        ])
+
+        chat_type = (
+            q.message.chat.type
+            if q.message
+            else ""
+        )
+
+        if chat_type == "channel":
+
+            try:
+
+                await q.edit_message_text(
+                    text,
+                    parse_mode="HTML",
+                    reply_markup=markup,
+                )
+
+            except Exception:
+                pass
+
+        else:
+
+            await q.message.reply_text(
+                text,
+                parse_mode="HTML",
+                reply_markup=markup,
+            )
+
+        return
+
+    # -----------------------------------------------------
+    # 使用说明
+    # -----------------------------------------------------
+
+    if data == "guide":
+
+        text = (
+            "📜 <b>使用说明</b>\n\n"
+            "🌸 T牌字：查看 T 分类\n"
+            "✨ A牌字：查看 A 分类\n"
+            "🪷 C牌字：查看 C 分类\n"
+            "🦋 F牌字：查看 F 分类\n\n"
+            "🆕 最新更新：查看最近新增资料\n"
+            "🔎 查询佳丽：输入牌字直接查询\n\n"
+            "下方三个入口可在三江休闲会所、"
+            "万象同城交流群和老挝万象—华人社区"
+            "之间快速跳转。"
+        )
+
+        markup = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton(
+                    "🔙 返回菜单",
+                    callback_data="home",
+                )
+            ]
+        ])
+
+        chat_type = (
+            q.message.chat.type
+            if q.message
+            else ""
+        )
+
+        if chat_type == "channel":
+
+            try:
+
+                await q.edit_message_text(
+                    text,
+                    parse_mode="HTML",
+                    reply_markup=markup,
+                )
+
+            except Exception:
+                pass
+
+        else:
+
+            await q.message.reply_text(
+                text,
+                parse_mode="HTML",
+                reply_markup=markup,
+            )
+
+        return
+
+
+# =========================================================
+# 用户输入牌字查询
+# =========================================================
+
+async def handle_text(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+
+    msg = update.effective_message
+
+    if not msg:
+        return
+
+    text = (
+        msg.text or ""
+    ).strip().upper()
+
+    # -----------------------------------------------------
+    # 单个牌字查询
+    # -----------------------------------------------------
+
+    match = CODE_RE.fullmatch(text)
+
+    if match:
+
+        touch_user(update)
+
+        code = match.group(1).upper()
+
+        row = get_code(code)
+
+        if not row:
+
+            await msg.reply_text(
+                f"暂未收录 {code}。"
+            )
+
+            return
+
+        await msg.reply_text(
+            f"🌸 查询结果：<b>{code}</b>",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(
+                        f"查看 {code} 资料",
+                        url=row["post_url"],
+                    )
+                ]
+            ]),
+        )
+
+        return
+
+    # -----------------------------------------------------
+    # 群里其他聊天不回复，避免刷屏
+    # -----------------------------------------------------
+
+    if update.effective_chat.type != "private":
+        return
+
+    # -----------------------------------------------------
+    # 私聊批量牌字
+    # -----------------------------------------------------
+
+    found = CODE_RE.findall(text)
+
+    if not found:
+        return
+
+    clickable_text, missing = (
+        make_clickable_text(
+            msg.text or ""
+        )
+    )
+
+    await msg.reply_text(
+        clickable_text,
+        parse_mode="HTML",
+        disable_web_page_preview=True,
+    )
+
+    if missing:
+
+        await msg.reply_text(
+            "⚠️ 以下牌字尚未录入：\n"
+            + "、".join(missing)
+        )
+
+
+# =========================================================
+# 自动监听三江休闲会所频道
+# =========================================================
+
+async def index_channel_post(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+
+    msg = (
+        update.channel_post
+        or update.edited_channel_post
+    )
+
+    if not msg:
+        return
+
+    chat_username = (
+        msg.chat.username
+        or ""
+    ).lower()
+
+    if (
+        chat_username
+        != CHANNEL_USERNAME
+        .lstrip("@")
+        .lower()
+    ):
+        return
+
+    source_text = " ".join(
+        part
+        for part in [
+            msg.caption,
+            msg.text,
+        ]
+        if part
+    ).upper()
+
+    codes = sorted(
+        set(
+            m.upper()
+            for m in
+            CODE_RE.findall(
+                source_text
+            )
+        )
+    )
+
+    if not codes:
+        return
+
+    post_url = (
+        f"https://t.me/"
+        f"{msg.chat.username}/"
+        f"{msg.message_id}"
+    )
+
+    for code in codes:
+
+        save_code(
+            code,
+            post_url,
+            msg.message_id,
+        )
+
+
+# =========================================================
+# 管理员：录入
+# =========================================================
+
+async def admin_set(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+
+    if not await is_master_admin(
+        update,
+        context,
+    ):
+
+        await update.effective_message.reply_text(
+            "此命令仅限管理员使用。"
+        )
+
+        return
+
+    if len(context.args) != 2:
+
+        await update.effective_message.reply_text(
+            "格式：\n"
+            "/set T77 "
+            "https://t.me/Laohuisuo/1084"
+        )
+
+        return
+
     code = context.args[0].upper()
+
     url = context.args[1]
 
     if not CODE_RE.fullmatch(code):
-        await update.effective_message.reply_text("代码格式不正确，例如 T55。")
+
+        await update.effective_message.reply_text(
+            "牌字格式不正确。\n"
+            "例如：T77、A26、C89、F128。"
+        )
+
         return
 
-    if not url.startswith("https://t.me/"):
-        await update.effective_message.reply_text("链接必须是 Telegram 帖子链接。")
+    if not url.startswith(
+        "https://t.me/"
+    ):
+
+        await update.effective_message.reply_text(
+            "必须填写 Telegram 帖子链接。"
+        )
+
         return
 
-    save_code(code, url)
-    await update.effective_message.reply_text(f"✅ {code} 已保存/更新。")
+    save_code(
+        code,
+        url,
+    )
+
+    await update.effective_message.reply_text(
+        f"✅ {code} 已保存/更新。"
+    )
 
 
-async def admin_del(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await is_channel_admin(update, context):
-        await update.effective_message.reply_text("此命令仅限频道管理员使用。")
+# =========================================================
+# 管理员：删除
+# =========================================================
+
+async def admin_del(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+
+    if not await is_master_admin(
+        update,
+        context,
+    ):
+
+        await update.effective_message.reply_text(
+            "此命令仅限管理员使用。"
+        )
+
         return
 
     if len(context.args) != 1:
-        await update.effective_message.reply_text("格式：/del T55")
+
+        await update.effective_message.reply_text(
+            "格式：/del T77"
+        )
+
         return
 
     code = context.args[0].upper()
+
     ok = delete_code(code)
+
     await update.effective_message.reply_text(
-        f"✅ {code} 已删除。" if ok else f"未找到 {code}。"
+        (
+            f"✅ {code} 已删除。"
+            if ok
+            else f"未找到 {code}。"
+        )
     )
 
 
-async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await is_channel_admin(update, context):
-        await update.effective_message.reply_text("此命令仅限频道管理员使用。")
+# =========================================================
+# 管理员：统计
+# =========================================================
+
+async def admin_stats(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+
+    if not await is_master_admin(
+        update,
+        context,
+    ):
+
+        await update.effective_message.reply_text(
+            "此命令仅限管理员使用。"
+        )
+
         return
 
     with db() as conn:
-        code_count = conn.execute("SELECT COUNT(*) FROM codes").fetchone()[0]
-        user_count = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+
+        code_count = conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM codes
+            """
+        ).fetchone()[0]
+
+        user_count = conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM users
+            """
+        ).fetchone()[0]
 
     await update.effective_message.reply_text(
-        f"📊 机器人统计\n\n已收录代码：{code_count}\n使用过机器人：{user_count}"
+        "📊 <b>机器人统计</b>\n\n"
+        f"已收录佳丽：{code_count}\n"
+        f"使用过查询：{user_count}",
+        parse_mode="HTML",
     )
 
 
+# =========================================================
+# 管理员：发布可点击出勤名单
+# =========================================================
+
+async def admin_publish(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+
+    if not await is_master_admin(
+        update,
+        context,
+    ):
+
+        await update.effective_message.reply_text(
+            "此命令仅限管理员使用。"
+        )
+
+        return
+
+    text = (
+        update.effective_message.text
+        or ""
+    )
+
+    parts = text.split(
+        "\n",
+        1,
+    )
+
+    if (
+        len(parts) < 2
+        or not parts[1].strip()
+    ):
+
+        await update.effective_message.reply_text(
+            "使用方法：\n\n"
+            "/publish\n"
+            "今日出勤\n\n"
+            "T77\n"
+            "A26\n"
+            "C89\n"
+            "F128"
+        )
+
+        return
+
+    body = parts[1].strip()
+
+    clickable_text, missing = (
+        make_clickable_text(
+            body
+        )
+    )
+
+    if missing:
+
+        await update.effective_message.reply_text(
+            "❌ 暂未发布。\n\n"
+            "以下牌字还没有资料链接：\n"
+            + "、".join(missing)
+        )
+
+        return
+
+    sent = await context.bot.send_message(
+        chat_id=CHANNEL_USERNAME,
+        text=clickable_text,
+        parse_mode="HTML",
+        disable_web_page_preview=True,
+    )
+
+    await update.effective_message.reply_text(
+        "✅ 已发布到三江休闲会所。\n\n"
+        f"https://t.me/"
+        f"{CHANNEL_USERNAME.lstrip('@')}/"
+        f"{sent.message_id}"
+    )
+
+
+# =========================================================
+# 启动
+# =========================================================
+
 def main():
+
     init_db()
 
-    app = Application.builder().token(BOT_TOKEN).build()
+    app = (
+        Application
+        .builder()
+        .token(BOT_TOKEN)
+        .build()
+    )
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("set", admin_set))
-    app.add_handler(CommandHandler("del", admin_del))
-    app.add_handler(CommandHandler("stats", admin_stats))
+    # 用户菜单
+    app.add_handler(
+        CommandHandler(
+            "start",
+            start,
+        )
+    )
 
-    app.add_handler(CallbackQueryHandler(button_router))
+    # 管理员发送当前群菜单
+    app.add_handler(
+        CommandHandler(
+            "menu",
+            menu,
+        )
+    )
 
-    # 频道新帖 + 编辑后的频道帖
+    # 一次发送到两个群 + 一个频道
+    app.add_handler(
+        CommandHandler(
+            "menuall",
+            menu_all,
+        )
+    )
+
+    # 管理员资料维护
+    app.add_handler(
+        CommandHandler(
+            "set",
+            admin_set,
+        )
+    )
+
+    app.add_handler(
+        CommandHandler(
+            "del",
+            admin_del,
+        )
+    )
+
+    app.add_handler(
+        CommandHandler(
+            "stats",
+            admin_stats,
+        )
+    )
+
+    app.add_handler(
+        CommandHandler(
+            "publish",
+            admin_publish,
+        )
+    )
+
+    # 菜单按钮
+    app.add_handler(
+        CallbackQueryHandler(
+            button_router
+        )
+    )
+
+    # 监听频道新帖
     app.add_handler(
         MessageHandler(
             filters.UpdateType.CHANNEL_POSTS,
@@ -373,15 +1383,19 @@ def main():
         )
     )
 
-    # 用户私聊输入代码
+    # 私聊和群聊牌字查询
     app.add_handler(
         MessageHandler(
-            filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND,
-            handle_private_text,
+            filters.TEXT
+            & ~filters.COMMAND,
+            handle_text,
         )
     )
 
-    print("LaowohuisuoBot is running...")
+    print(
+        "LaowohuisuoBot is running..."
+    )
+
     app.run_polling(
         allowed_updates=[
             "message",
